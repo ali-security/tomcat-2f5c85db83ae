@@ -1114,4 +1114,94 @@ public class TestRewriteValve extends TomcatBaseTest {
                 URLDecoder.decode(expectedSegment, StandardCharsets.UTF_8)));
         Assert.assertTrue(body, body.contains("REQUEST-QUERY-STRING: " + expectedQueryString));
     }
+
+    @Test
+    public void testOrCondDoesNotSkipNonOrCond() throws Exception {
+        Tomcat tomcat = getTomcatInstance();
+
+        Context ctx = getProgrammaticRootContext();
+
+        RewriteValve rewriteValve = new RewriteValve();
+        ctx.getPipeline().addValve(rewriteValve);
+
+        rewriteValve.setConfiguration(
+                "RewriteCond %{HTTP_HOST} localhost [OR]\n" +
+                        "RewriteCond %{HTTP_HOST} 127.0.0.1\n" +
+                        "RewriteCond %{REQUEST_URI} ^/admin\n" +
+                "RewriteRule ^(.*) /blocked$1 [R]");
+
+        Tomcat.addServlet(ctx, "snoop", new SnoopServlet());
+        ctx.addServletMappingDecoded("/other", "snoop");
+
+        tomcat.start();
+
+        ByteChunk res = new ByteChunk();
+        int rc = getUrl("http://localhost:" + getPort() + "/other", res, false);
+
+        Assert.assertEquals(HttpServletResponse.SC_OK, rc);
+
+        res.setCharset(StandardCharsets.UTF_8);
+        String body = res.toString();
+        Assert.assertTrue(body, body.contains("REQUEST-URI: /other"));
+    }
+
+    @Test
+    public void testOrCondSecondMemberDoesNotSkipNonOrCond() throws Exception {
+        // C2 (the last member of the OR chain) matches, C3 must still be evaluated
+        doTestOrCondChain(
+                "RewriteCond %{HTTP_HOST} nomatch.example [OR]\n" +
+                        "RewriteCond %{HTTP_HOST} localhost\n" +
+                        "RewriteCond %{REQUEST_URI} ^/admin.*\n" +
+                "RewriteRule ^(.*) /blocked$1 [R]",
+                "/other", HttpServletResponse.SC_OK);
+    }
+
+    @Test
+    public void testOrCondDoesNotExtendToNonOrCond() throws Exception {
+        // C1 and C2 fail so (C1 OR C2) fails; C3 matching must not trigger the rewrite
+        doTestOrCondChain(
+                "RewriteCond %{HTTP_HOST} nomatch1.example [OR]\n" +
+                        "RewriteCond %{HTTP_HOST} nomatch2.example\n" +
+                        "RewriteCond %{REQUEST_URI} ^/other.*\n" +
+                "RewriteRule ^(.*) /blocked$1 [R]",
+                "/other", HttpServletResponse.SC_OK);
+    }
+
+    @Test
+    public void testOrCondChainMatches() throws Exception {
+        // (C1 OR C2) AND C3 with C1 and C3 matching must rewrite
+        doTestOrCondChain(
+                "RewriteCond %{HTTP_HOST} localhost [OR]\n" +
+                        "RewriteCond %{HTTP_HOST} nomatch.example\n" +
+                        "RewriteCond %{REQUEST_URI} ^/other.*\n" +
+                "RewriteRule ^(.*) /blocked$1 [R]",
+                "/other", HttpServletResponse.SC_FOUND);
+    }
+
+    private void doTestOrCondChain(String config, String path, int expectedStatus) throws Exception {
+        Tomcat tomcat = getTomcatInstance();
+
+        Context ctx = getProgrammaticRootContext();
+
+        RewriteValve rewriteValve = new RewriteValve();
+        ctx.getPipeline().addValve(rewriteValve);
+
+        rewriteValve.setConfiguration(config);
+
+        Tomcat.addServlet(ctx, "snoop", new SnoopServlet());
+        ctx.addServletMappingDecoded(path, "snoop");
+
+        tomcat.start();
+
+        ByteChunk res = new ByteChunk();
+        int rc = getUrl("http://localhost:" + getPort() + path, res, false);
+
+        Assert.assertEquals(expectedStatus, rc);
+
+        if (expectedStatus == HttpServletResponse.SC_OK) {
+            res.setCharset(StandardCharsets.UTF_8);
+            String body = res.toString();
+            Assert.assertTrue(body, body.contains("REQUEST-URI: " + path));
+        }
+    }
 }
